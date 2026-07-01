@@ -156,7 +156,7 @@ async function getSummary() {
     const nombre = row.get('Nombre') || '';
     const apellido = row.get('Apellido') || '';
     const key = normalizar(`${nombre} ${apellido}`);
-    const deuda = parseDeuda(row.get('Deuda'));
+    const deuda = parseDeuda(row.get('Deuda')) ;
 
     if (!mapa[key]) {
       mapa[key] = { nombre, apellido, deuda: 0 };
