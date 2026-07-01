@@ -99,11 +99,12 @@ if (msg.body.trim().toLowerCase() === '/id') {
     return;
   }
 
-//if (chat.id._serialized !== config.groupId) return;
-//if (!config.allowedNumbers.includes(senderId)) return;
+if (chat.id._serialized !== config.groupId) return;
+if (!config.allowedNumbers.includes(senderId)) return;
 
   const text = msg.body.trim();
-
+  
+  console.log('📬 Mensaje entrante de:', senderId, 'Texto:', text);
   // /ayuda
   if (isAyudaCommand(text)) {
     await chat.sendMessage(MENSAJE_AYUDA);
