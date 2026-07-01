@@ -60,10 +60,12 @@ mongoose.connect(config.mongoUri).then(async () => {
     },
   });
 
-  client.on('qr', (qr) => {
-    console.log('📱 Escaneá este QR con WhatsApp:');
+client.on('qr', qr => {
     qrcode.generate(qr, { small: true });
-  });
+    console.log('--- COPIÁ EL TEXTO DE ABAJO Y PEGALO EN UN GENERADOR DE QR ---');
+    console.log(qr);
+    console.log('--------------------------------------------------------------');
+});
 
   client.on('ready', () => {
     console.log('✅ Bot conectado y listo.');
