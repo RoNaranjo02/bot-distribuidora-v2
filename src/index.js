@@ -48,7 +48,7 @@ _El bot acepta mayúsculas y minúsculas_
 _Montos aceptados: 50000 / 50.000 / $50.000_
 _Fechas aceptadas: 02/07/2026 o 2/7/26_`;
 
-// ─── SERVIDOR EXPRESS (solo para mostrar el QR en Railway) ───────────────────
+// ─── SERVIDOR EXPRESS ─────────────────────────────────────────────────────────
 
 const app = express();
 let qrImageBase64 = null;
@@ -110,7 +110,7 @@ const client = new Client({
     args: puppeteerArgs,
   },
   webVersionCache: {
-    type: 'none'
+    type: 'none',
   },
   authTimeoutMs: 120000,
 });
@@ -119,7 +119,7 @@ client.on('qr', async (qr) => {
   console.log('📱 Nuevo QR generado.');
   try {
     qrImageBase64 = await qrcode.toDataURL(qr);
-    console.log(`🌐 QR disponible en la web para escanear.`);
+    console.log('🌐 QR disponible en la web para escanear.');
   } catch (err) {
     console.error('Error generando imagen QR:', err);
   }
@@ -139,14 +139,33 @@ client.on('disconnected', (reason) => {
 
 client.on('message', async (msg) => {
   try {
-    // --- COMANDO SECRETO PARA OBTENER EL ID ---
-    if (msg.body === '/id') {
+    // Comando de diagnóstico — muestra IDs exactos para configurar .env
+    if (msg.body.trim() === '/id') {
       const chat = await msg.getChat();
-      await msg.reply(`El ID de este chat es:\n${chat.id._serialized}`);
-      console.log('ID DEL CHAT:', chat.id._serialized);
+      const senderId = msg.author || msg.from;
+      const info = [
+        `*Datos de diagnóstico:*`,
+        `👤 Tu ID (senderId): ${senderId}`,
+        `💬 ID de este chat: ${chat.id._serialized}`,
+        ``,
+        `*Valores actuales en config:*`,
+        `GROUP_ID: ${config.groupId}`,
+        `ALLOWED_NUMBERS: ${config.allowedNumbers.join(', ')}`,
+        ``,
+        `*¿Coinciden?*`,
+        `Grupo: ${chat.id._serialized === config.groupId ? '✅ SÍ' : '❌ NO'}`,
+        `Sender: ${config.allowedNumbers.includes(senderId) ? '✅ SÍ' : '❌ NO'}`,
+      ].join('\n');
+
+      await msg.reply(info);
+      console.log('=== DIAGNÓSTICO ===');
+      console.log('senderId:', senderId);
+      console.log('chatId:', chat.id._serialized);
+      console.log('groupId en config:', config.groupId);
+      console.log('allowedNumbers en config:', config.allowedNumbers);
+      console.log('===================');
       return;
     }
-    // ------------------------------------------
 
     await handleMessage(msg, client);
   } catch (err) {
@@ -160,12 +179,24 @@ client.initialize();
 
 async function handleMessage(msg, client) {
   const chat = await msg.getChat();
-  if (chat.id._serialized !== config.groupId) return;
-
   const senderId = msg.author || msg.from;
-  if (!config.allowedNumbers.includes(senderId)) return;
-
   const text = msg.body.trim();
+
+  // ── DEBUG TEMPORAL ───────────────────────────────────────────────
+  console.log(`[MSG] chat: ${chat.id._serialized} | sender: ${senderId} | text: ${text}`);
+  console.log(`[FILTRO GRUPO] esperado="${config.groupId}" recibido="${chat.id._serialized}" match=${chat.id._serialized === config.groupId}`);
+  console.log(`[FILTRO SENDER] allowed=${JSON.stringify(config.allowedNumbers)} sender="${senderId}" match=${config.allowedNumbers.includes(senderId)}`);
+  // ─────────────────────────────────────────────────────────────────
+
+  if (chat.id._serialized !== config.groupId) {
+    console.log('[BLOQUEADO] Por filtro de grupo');
+    return;
+  }
+
+  if (!config.allowedNumbers.includes(senderId)) {
+    console.log('[BLOQUEADO] Por filtro de sender');
+    return;
+  }
 
   if (isAyudaCommand(text)) {
     await chat.sendMessage(MENSAJE_AYUDA);
@@ -177,14 +208,10 @@ async function handleMessage(msg, client) {
   }
 
   const nuevoCliente = parseNuevo(text);
-  if (nuevoCliente) {
-    return handleNuevaDeuda(chat, nuevoCliente);
-  }
+  if (nuevoCliente) return handleNuevaDeuda(chat, nuevoCliente);
 
   const cambioFecha = parseFecha(text);
-  if (cambioFecha) {
-    return handleUpdateFecha(chat, cambioFecha);
-  }
+  if (cambioFecha) return handleUpdateFecha(chat, cambioFecha);
 
   const resumen = parseResumen(text);
   if (resumen) {
@@ -194,9 +221,9 @@ async function handleMessage(msg, client) {
   }
 
   const parsed = parseDebitoCredito(text);
-  if (parsed) {
-    return handleDebitoCredito(chat, parsed);
-  }
+  if (parsed) return handleDebitoCredito(chat, parsed);
+
+  console.log('[SIN MATCH] El mensaje no coincidió con ningún comando.');
 }
 
 async function handleDebitoCredito(chat, { nombreCompleto, monto }) {
