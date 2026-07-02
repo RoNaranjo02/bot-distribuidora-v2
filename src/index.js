@@ -1,8 +1,5 @@
-const { Client, RemoteAuth, LocalAuth } = require('whatsapp-web.js');
-const { MongoStore } = require('wwebjs-mongo');
-const mongoose = require('mongoose');
+const { Client, LocalAuth } = require('whatsapp-web.js');
 const qrcode = require('qrcode');
-const qrTerminal = require('qrcode-terminal');
 const express = require('express');
 const cron = require('node-cron');
 const config = require('./config');
@@ -54,7 +51,7 @@ _Fechas aceptadas: 02/07/2026 o 2/7/26_`;
 // ─── SERVIDOR EXPRESS (solo para mostrar el QR en Railway) ───────────────────
 
 const app = express();
-let qrImageBase64 = null; // guardamos el QR actual acá
+let qrImageBase64 = null;
 let botListo = false;
 
 app.get('/', (req, res) => {
@@ -77,7 +74,6 @@ app.get('/', (req, res) => {
     `);
   }
 
-  // Muestra el QR como imagen — recarga automática cada 20s por si vence
   res.send(`
     <html><body style="font-family:sans-serif;text-align:center;padding:40px;background:#f5f5f5">
       <h2>📱 Escaneá este QR con WhatsApp</h2>
@@ -96,105 +92,66 @@ app.listen(PORT, () => {
 
 // ─────────────────────────────────────────────────────────────────────────────
 
-mongoose.connect(config.mongoUri).then(async () => {
-  console.log('✅ MongoDB conectado.');
+const puppeteerArgs = [
+  '--no-sandbox',
+  '--disable-setuid-sandbox',
+  '--disable-dev-shm-usage',
+  '--disable-gpu',
+  '--no-first-run',
+  '--no-zygote',
+  '--single-process',
+  '--disable-extensions',
+];
 
-  const store = new MongoStore({ mongoose });
-  const enLaNube = process.env.RAILWAY_ENVIRONMENT;
+const client = new Client({
+  authStrategy: new LocalAuth({ clientId: 'bot-distri' }),
+  puppeteer: {
+    headless: true,
+    args: puppeteerArgs,
+  },
+  authTimeoutMs: 120000,
+});
 
-  console.log(enLaNube
-    ? '☁️ Entorno: NUBE (RemoteAuth + MongoDB)'
-    : '💻 Entorno: LOCAL (LocalAuth)'
-  );
+client.on('qr', async (qr) => {
+  console.log('📱 Nuevo QR generado.');
+  try {
+    qrImageBase64 = await qrcode.toDataURL(qr);
+    console.log(`🌐 QR disponible en la web para escanear.`);
+  } catch (err) {
+    console.error('Error generando imagen QR:', err);
+  }
+});
 
-  // Args de Puppeteer — los de Railway son más agresivos para ahorrar memoria
-  const puppeteerArgs = [
-    '--no-sandbox',
-    '--disable-setuid-sandbox',
-    '--disable-dev-shm-usage',
-    '--disable-gpu',
-    '--no-first-run',
-    '--no-zygote',
-    '--single-process',          // clave en Railway: evita que Chromium forkee procesos
-    '--disable-extensions',
-    '--disable-background-networking',
-    '--disable-default-apps',
-    '--disable-sync',
-    '--metrics-recording-only',
-    '--mute-audio',
-    '--no-default-browser-check',
-    '--safebrowsing-disable-auto-update',
-  ];
+client.on('ready', () => {
+  botListo = true;
+  qrImageBase64 = null;
+  console.log('✅ Bot conectado y listo.');
+  iniciarCronJobs(client);
+});
 
-  const client = new Client({
-    authStrategy: enLaNube
-      ? new RemoteAuth({
-          clientId: 'bot-distri',
-          store,
-          backupSyncIntervalMs: 60000, // cada minuto en nube (más frecuente)
-        })
-      : new LocalAuth({ clientId: 'bot-distri' }),
-    puppeteer: {
-      headless: true,
-      args: puppeteerArgs,
-    },
-    // Le damos más tiempo a WhatsApp Web para cargar en Railway
-    authTimeoutMs: 120000,
-  });
-
-  client.on('qr', async (qr) => {
-    console.log('📱 Nuevo QR generado.');
-
-    // En local: mostrar en terminal también
-    if (!enLaNube) {
-      qrTerminal.generate(qr, { small: true });
-    }
-
-    // En ambos entornos: guardar como base64 para el servidor web
-    try {
-      qrImageBase64 = await qrcode.toDataURL(qr);
-      console.log(`🌐 QR disponible en: http://localhost:${PORT}`);
-      if (enLaNube) {
-        console.log('☁️ En Railway: abrí la URL pública de tu servicio para escanear el QR.');
-      }
-    } catch (err) {
-      console.error('Error generando imagen QR:', err);
-    }
-  });
-
-  client.on('ready', () => {
-    botListo = true;
-    qrImageBase64 = null; // limpiamos el QR, ya no hace falta
-    console.log('✅ Bot conectado y listo.');
-    iniciarCronJobs(client);
-  });
-
-  client.on('remote_session_saved', () => {
-    console.log('💾 Sesión guardada en MongoDB correctamente.');
-  });
-
-  client.on('disconnected', (reason) => {
-    botListo = false;
-    console.warn('⚠️ Bot desconectado:', reason);
-    // WhatsApp Web se reconecta solo en la mayoría de los casos
-    // Si no, Railway reiniciará el proceso y cargará la sesión de Mongo
-  });
+client.on('disconnected', (reason) => {
+  botListo = false;
+  console.warn('⚠️ Bot desconectado:', reason);
+});
 
 client.on('message', async (msg) => {
-    try {
-      // --- COMANDO SECRETO PARA OBTENER EL ID ---
-      if (msg.body === '/id') {
-        const chat = await msg.getChat();
-        await msg.reply(`El ID de este chat es:\n${chat.id._serialized}`);
-        console.log('ID DEL CHAT:', chat.id._serialized);
-      }
-      // ------------------------------------------
-
-      await handleMessage(msg, client);
-    } catch (err) {
-      console.error('Error procesando mensaje:', err);
+  try {
+    // --- COMANDO SECRETO PARA OBTENER EL ID ---
+    if (msg.body === '/id') {
+      const chat = await msg.getChat();
+      await msg.reply(`El ID de este chat es:\n${chat.id._serialized}`);
+      console.log('ID DEL CHAT:', chat.id._serialized);
+      return;
     }
-  });
+    // ------------------------------------------
+
+    await handleMessage(msg, client);
+  } catch (err) {
+    console.error('Error procesando mensaje:', err);
+  }
+});
+
+client.initialize();
 
 // ─── HANDLERS ────────────────────────────────────────────────────────────────
 
@@ -373,5 +330,5 @@ function iniciarCronJobs(client) {
     timezone: 'America/Argentina/Buenos_Aires',
   });
 
-  console.log('⏰ Cron job iniciado.' );
+  console.log('⏰ Cron job iniciado.');
 }
