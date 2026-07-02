@@ -180,16 +180,21 @@ mongoose.connect(config.mongoUri).then(async () => {
     // Si no, Railway reiniciará el proceso y cargará la sesión de Mongo
   });
 
-  client.on('message', async (msg) => {
+client.on('message', async (msg) => {
     try {
+      // --- COMANDO SECRETO PARA OBTENER EL ID ---
+      if (msg.body === '/id') {
+        const chat = await msg.getChat();
+        await msg.reply(`El ID de este chat es:\n${chat.id._serialized}`);
+        console.log('ID DEL CHAT:', chat.id._serialized);
+      }
+      // ------------------------------------------
+
       await handleMessage(msg, client);
     } catch (err) {
       console.error('Error procesando mensaje:', err);
     }
   });
-
-  client.initialize();
-});
 
 // ─── HANDLERS ────────────────────────────────────────────────────────────────
 
