@@ -1,11 +1,20 @@
 const { Client, RemoteAuth, LocalAuth } = require('whatsapp-web.js');
 const { MongoStore } = require('wwebjs-mongo');
 const mongoose = require('mongoose');
-const qrcode = require('qrcode-terminal');
+const qrcode = require('qrcode');
+const qrTerminal = require('qrcode-terminal');
+const express = require('express');
 const cron = require('node-cron');
 const config = require('./config');
 const sheets = require('./sheets');
-const { parseDebitoCredito, parseResumen, isAyudaCommand, parseNuevo, parseFecha, isHoyCommand } = require('./commandParser');
+const {
+  parseDebitoCredito,
+  parseResumen,
+  isAyudaCommand,
+  parseNuevo,
+  parseFecha,
+  isHoyCommand,
+} = require('./commandParser');
 
 const MENSAJE_AYUDA = `📋 *Comandos disponibles:*
 
@@ -42,38 +51,133 @@ _El bot acepta mayúsculas y minúsculas_
 _Montos aceptados: 50000 / 50.000 / $50.000_
 _Fechas aceptadas: 02/07/2026 o 2/7/26_`;
 
+// ─── SERVIDOR EXPRESS (solo para mostrar el QR en Railway) ───────────────────
+
+const app = express();
+let qrImageBase64 = null; // guardamos el QR actual acá
+let botListo = false;
+
+app.get('/', (req, res) => {
+  if (botListo) {
+    return res.send(`
+      <html><body style="font-family:sans-serif;text-align:center;padding:40px">
+        <h2>✅ Bot conectado y funcionando</h2>
+        <p>No hay QR pendiente.</p>
+      </body></html>
+    `);
+  }
+
+  if (!qrImageBase64) {
+    return res.send(`
+      <html><body style="font-family:sans-serif;text-align:center;padding:40px">
+        <h2>⏳ Iniciando bot...</h2>
+        <p>El QR todavía no está disponible. Recargá en unos segundos.</p>
+        <script>setTimeout(() => location.reload(), 3000)</script>
+      </body></html>
+    `);
+  }
+
+  // Muestra el QR como imagen — recarga automática cada 20s por si vence
+  res.send(`
+    <html><body style="font-family:sans-serif;text-align:center;padding:40px;background:#f5f5f5">
+      <h2>📱 Escaneá este QR con WhatsApp</h2>
+      <p>WhatsApp → Dispositivos vinculados → Vincular dispositivo</p>
+      <img src="${qrImageBase64}" style="width:300px;height:300px;border:8px solid white;border-radius:12px;box-shadow:0 4px 20px rgba(0,0,0,0.15)" />
+      <p style="color:#888;font-size:14px">Esta página se recarga automáticamente cada 25 segundos</p>
+      <script>setTimeout(() => location.reload(), 25000)</script>
+    </body></html>
+  `);
+});
+
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+  console.log(`🌐 Servidor QR disponible en el puerto ${PORT}`);
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+
 mongoose.connect(config.mongoUri).then(async () => {
   console.log('✅ MongoDB conectado.');
 
   const store = new MongoStore({ mongoose });
   const enLaNube = process.env.RAILWAY_ENVIRONMENT;
 
-  console.log(enLaNube ? '☁️ Entorno: NUBE (RemoteAuth + MongoDB)' : '💻 Entorno: LOCAL (LocalAuth)');
+  console.log(enLaNube
+    ? '☁️ Entorno: NUBE (RemoteAuth + MongoDB)'
+    : '💻 Entorno: LOCAL (LocalAuth)'
+  );
+
+  // Args de Puppeteer — los de Railway son más agresivos para ahorrar memoria
+  const puppeteerArgs = [
+    '--no-sandbox',
+    '--disable-setuid-sandbox',
+    '--disable-dev-shm-usage',
+    '--disable-gpu',
+    '--no-first-run',
+    '--no-zygote',
+    '--single-process',          // clave en Railway: evita que Chromium forkee procesos
+    '--disable-extensions',
+    '--disable-background-networking',
+    '--disable-default-apps',
+    '--disable-sync',
+    '--metrics-recording-only',
+    '--mute-audio',
+    '--no-default-browser-check',
+    '--safebrowsing-disable-auto-update',
+  ];
 
   const client = new Client({
     authStrategy: enLaNube
-      ? new RemoteAuth({ clientId: 'bot-distri', store, backupSyncIntervalMs: 300000 })
+      ? new RemoteAuth({
+          clientId: 'bot-distri',
+          store,
+          backupSyncIntervalMs: 60000, // cada minuto en nube (más frecuente)
+        })
       : new LocalAuth({ clientId: 'bot-distri' }),
     puppeteer: {
       headless: true,
-      args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu'],
+      args: puppeteerArgs,
     },
+    // Le damos más tiempo a WhatsApp Web para cargar en Railway
+    authTimeoutMs: 120000,
   });
 
-client.on('qr', qr => {
-    qrcode.generate(qr, { small: true });
-    console.log('--- COPIÁ EL TEXTO DE ABAJO Y PEGALO EN UN GENERADOR DE QR ---');
-    console.log(qr);
-    console.log('--------------------------------------------------------------');
-});
+  client.on('qr', async (qr) => {
+    console.log('📱 Nuevo QR generado.');
+
+    // En local: mostrar en terminal también
+    if (!enLaNube) {
+      qrTerminal.generate(qr, { small: true });
+    }
+
+    // En ambos entornos: guardar como base64 para el servidor web
+    try {
+      qrImageBase64 = await qrcode.toDataURL(qr);
+      console.log(`🌐 QR disponible en: http://localhost:${PORT}`);
+      if (enLaNube) {
+        console.log('☁️ En Railway: abrí la URL pública de tu servicio para escanear el QR.');
+      }
+    } catch (err) {
+      console.error('Error generando imagen QR:', err);
+    }
+  });
 
   client.on('ready', () => {
+    botListo = true;
+    qrImageBase64 = null; // limpiamos el QR, ya no hace falta
     console.log('✅ Bot conectado y listo.');
     iniciarCronJobs(client);
   });
 
   client.on('remote_session_saved', () => {
-    console.log('💾 Sesión guardada en MongoDB.');
+    console.log('💾 Sesión guardada en MongoDB correctamente.');
+  });
+
+  client.on('disconnected', (reason) => {
+    botListo = false;
+    console.warn('⚠️ Bot desconectado:', reason);
+    // WhatsApp Web se reconecta solo en la mayoría de los casos
+    // Si no, Railway reiniciará el proceso y cargará la sesión de Mongo
   });
 
   client.on('message', async (msg) => {
@@ -87,50 +191,36 @@ client.on('qr', qr => {
   client.initialize();
 });
 
+// ─── HANDLERS ────────────────────────────────────────────────────────────────
+
 async function handleMessage(msg, client) {
-  const chat = await msg.getChat();  
+  const chat = await msg.getChat();
+  if (chat.id._serialized !== config.groupId) return;
+
   const senderId = msg.author || msg.from;
-
-if (msg.body.trim().toLowerCase() === '/id') {
-    console.log('--- DATOS DE CONFIGURACIÓN ---');
-    console.log('ID del Chat/Grupo:', chat.id._serialized);
-    console.log('ID del Remitente:', senderId);
-    console.log('------------------------------');
-    
-    await chat.sendMessage(`*Datos del bot:*\nID Grupo: ${chat.id._serialized}\nID Usuario: ${senderId}`);
-    return;
-  }
-
-//if (chat.id._serialized !== config.groupId) return;
-//if (!config.allowedNumbers.includes(senderId)) return;
+  if (!config.allowedNumbers.includes(senderId)) return;
 
   const text = msg.body.trim();
 
-  console.log('📬 Mensaje entrante de:', senderId, 'Texto:', text);
-  // /ayuda
   if (isAyudaCommand(text)) {
     await chat.sendMessage(MENSAJE_AYUDA);
     return;
   }
 
-  // /hoy → vencimientos del día
   if (isHoyCommand(text)) {
     return handleHoy(chat);
   }
 
-  // /a y /n → nueva deuda (ambos unificados en parseNuevo)
   const nuevoCliente = parseNuevo(text);
   if (nuevoCliente) {
     return handleNuevaDeuda(chat, nuevoCliente);
   }
 
-  // /f → actualizar fecha
   const cambioFecha = parseFecha(text);
   if (cambioFecha) {
     return handleUpdateFecha(chat, cambioFecha);
   }
 
-  // /r o /r Nombre
   const resumen = parseResumen(text);
   if (resumen) {
     return resumen.nombreCompleto === null
@@ -138,17 +228,14 @@ if (msg.body.trim().toLowerCase() === '/id') {
       : handleResumenCliente(chat, resumen.nombreCompleto);
   }
 
-  // /d → débito FIFO
   const parsed = parseDebitoCredito(text);
   if (parsed) {
     return handleDebitoCredito(chat, parsed);
   }
 }
 
-// /d → pago FIFO
 async function handleDebitoCredito(chat, { nombreCompleto, monto }) {
-  const delta = -monto; // siempre negativo para débito
-  const resultado = await sheets.updateDebt(nombreCompleto, delta);
+  const resultado = await sheets.updateDebt(nombreCompleto, -monto);
 
   if (resultado === null) {
     await chat.sendMessage(`❌ Cliente no encontrado: ${nombreCompleto}\n\nVerificá que el nombre coincida con el del registro.`);
@@ -161,7 +248,6 @@ async function handleDebitoCredito(chat, { nombreCompleto, monto }) {
   );
 }
 
-// /n y /a → nueva fila de deuda
 async function handleNuevaDeuda(chat, { nombre, apellido, monto, fecha }) {
   await sheets.addClient(nombre, apellido, monto, fecha);
 
@@ -171,7 +257,6 @@ async function handleNuevaDeuda(chat, { nombre, apellido, monto, fecha }) {
   await chat.sendMessage(mensaje);
 }
 
-// /f → cambiar fecha
 async function handleUpdateFecha(chat, { nombreCompleto, fecha }) {
   const resultado = await sheets.updateFecha(nombreCompleto, fecha);
 
@@ -185,7 +270,6 @@ async function handleUpdateFecha(chat, { nombreCompleto, fecha }) {
   );
 }
 
-// /r Nombre → deuda total + desglose de cuotas
 async function handleResumenCliente(chat, nombreCompleto) {
   const data = await sheets.getClientDebt(nombreCompleto);
 
@@ -195,7 +279,6 @@ async function handleResumenCliente(chat, nombreCompleto) {
   }
 
   const { nombre, apellido, deuda, cuotas } = data;
-
   let mensaje = `📋 *${nombre} ${apellido}*\n`;
   mensaje += `💰 Deuda total: $${deuda.toLocaleString('es-AR')}\n`;
 
@@ -211,7 +294,6 @@ async function handleResumenCliente(chat, nombreCompleto) {
   await chat.sendMessage(mensaje);
 }
 
-// /r  resumen general agrupado
 async function handleResumenGeneral(chat) {
   const data = await sheets.getSummary();
 
@@ -222,7 +304,6 @@ async function handleResumenGeneral(chat) {
 
   let resumen = '📊 *ESTADO DE CUENTAS* 📊\n';
   resumen += '════════════════════\n\n';
-  
   let total = 0;
 
   data.forEach(({ nombre, apellido, deuda }) => {
@@ -233,10 +314,10 @@ async function handleResumenGeneral(chat) {
 
   resumen += '════════════════════\n';
   resumen += `📈 *TOTAL ADEUDADO:* $${total.toLocaleString('es-AR')}`;
-  
+
   await chat.sendMessage(resumen);
 }
-// /hoy → Resumen de vencimientos del día con formato lindo
+
 async function handleHoy(chat) {
   const vencimientos = await sheets.getVencimientosHoy();
 
@@ -255,7 +336,7 @@ async function handleHoy(chat) {
 
   mensaje += '════════════════════\n';
   mensaje += '_Por favor regularizar los pagos._';
-  
+
   await chat.sendMessage(mensaje);
 }
 
@@ -287,5 +368,5 @@ function iniciarCronJobs(client) {
     timezone: 'America/Argentina/Buenos_Aires',
   });
 
-  console.log('⏰ Cron job iniciado (todos los días a las 8:00am ARG).');
+  console.log('⏰ Cron job iniciado.');
 }
