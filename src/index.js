@@ -368,5 +368,5 @@ function iniciarCronJobs(client) {
     timezone: 'America/Argentina/Buenos_Aires',
   });
 
-  console.log('⏰ Cron job iniciado.');
+  console.log('⏰ Cron job iniciado.' );
 }
