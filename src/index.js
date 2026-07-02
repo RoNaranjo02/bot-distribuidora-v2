@@ -109,6 +109,9 @@ const client = new Client({
     headless: true,
     args: puppeteerArgs,
   },
+  webVersionCache: {
+    type: 'none'
+  },
   authTimeoutMs: 120000,
 });
 
