@@ -333,7 +333,7 @@ async function handleHoy(chat) {
 }
 
 function iniciarCronJobs(client) {
-  cron.schedule('10 12 * * *', async () => {
+  cron.schedule('0 08 * * *', async () => {
     console.log('⏰ Cron: revisando vencimientos de hoy...');
     try {
       const vencimientos = await sheets.getVencimientosHoy();
