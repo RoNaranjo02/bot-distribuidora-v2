@@ -14,8 +14,15 @@ async function getSheet() {
   return doc.sheetsByIndex[0];
 }
 
+// Compara sin importar mayúsculas o espacios extra
 function normalizar(str) {
   return (str || '').trim().toLowerCase().replace(/\s+/g, ' ');
+}
+
+// NUEVO: Capitaliza la primera letra de cada palabra (Ej: "juan cruz" -> "Juan Cruz")
+function formatearNombre(str) {
+  if (!str) return '';
+  return normalizar(str).replace(/\b\w/g, c => c.toUpperCase());
 }
 
 function parseDeuda(valor) {
@@ -28,7 +35,7 @@ function parseDeuda(valor) {
   return isNaN(monto) ? 0 : monto;
 }
 
-// Devuelve TODAS las filas de un cliente (puede haber varias)
+// Devuelve TODAS las filas de un cliente
 async function findClientRows(nombreCompleto) {
   const sheet = await getSheet();
   const rows = await sheet.getRows();
@@ -41,13 +48,13 @@ async function findClientRows(nombreCompleto) {
   });
 }
 
-// NUEVA DEUDA: siempre inserta una fila nueva (modelo de tickets)
+// NUEVA DEUDA: Guarda embelleciendo el texto
 async function addClient(nombre, apellido, monto, fechaLimite = '') {
   const sheet = await getSheet();
 
   await sheet.addRow({
-    'Nombre': nombre,
-    'Apellido': apellido,
+    'Nombre': formatearNombre(nombre),
+    'Apellido': formatearNombre(apellido),
     'Deuda': monto,
     'Fecha Limite': fechaLimite,
   });
@@ -55,22 +62,16 @@ async function addClient(nombre, apellido, monto, fechaLimite = '') {
   return true;
 }
 
-// DÉBITO FIFO: descuenta el pago de las filas más antiguas primero
+// DÉBITO FIFO
 async function updateDebt(nombreCompleto, delta) {
-  // delta es negativo cuando se paga (viene de /d)
   const rows = await findClientRows(nombreCompleto);
 
   if (rows.length === 0) return null;
 
-  // Nombre y apellido reales (tal como están en el Sheet)
   const nombre = rows[0].get('Nombre');
   const apellido = rows[0].get('Apellido');
 
-  // Solo si es un pago (delta negativo) aplicamos FIFO
-  // Si es una acreditación (delta positivo) no debería llegar acá,
-  // porque /a ahora usa addClient directamente. Pero lo manejamos igual por seguridad.
   if (delta > 0) {
-    // Acreditación directa sobre la última fila (caso borde)
     const ultimaFila = rows[rows.length - 1];
     const deudaActual = parseDeuda(ultimaFila.get('Deuda'));
     ultimaFila.set('Deuda', deudaActual + delta);
@@ -80,7 +81,6 @@ async function updateDebt(nombreCompleto, delta) {
     return { nuevaDeuda: totalNuevo, nombre, apellido, desglose: null };
   }
 
-  // Pago: montoPendiente es el valor absoluto del delta
   let montoPendiente = Math.abs(delta);
   const rowsGuardadas = [];
 
@@ -88,14 +88,12 @@ async function updateDebt(nombreCompleto, delta) {
     if (montoPendiente <= 0) break;
 
     const deudaFila = parseDeuda(row.get('Deuda'));
-    if (deudaFila <= 0) continue; // fila ya saldada, la saltamos
+    if (deudaFila <= 0) continue; 
 
     if (montoPendiente >= deudaFila) {
-      // El pago cubre esta fila entera
       montoPendiente -= deudaFila;
       row.set('Deuda', 0);
     } else {
-      // El pago cubre parcialmente esta fila
       row.set('Deuda', deudaFila - montoPendiente);
       montoPendiente = 0;
     }
@@ -103,22 +101,19 @@ async function updateDebt(nombreCompleto, delta) {
     rowsGuardadas.push(row);
   }
 
-  // Guardamos todas las filas modificadas en paralelo
   await Promise.all(rowsGuardadas.map((row) => row.save()));
-
-  console.log(`Debug FIFO: ${nombre} ${apellido} | Delta: ${delta} | Sobrante sin aplicar: ${montoPendiente}`);
 
   const totalNuevo = await getTotalDeuda(nombreCompleto);
   return { nuevaDeuda: totalNuevo, nombre, apellido, desglose: null };
 }
 
-// Suma todas las deudas de un cliente (todas sus filas)
+// Suma todas las deudas de un cliente
 async function getTotalDeuda(nombreCompleto) {
   const rows = await findClientRows(nombreCompleto);
   return rows.reduce((acc, row) => acc + parseDeuda(row.get('Deuda')), 0);
 }
 
-// Resumen individual: total + desglose de cuotas pendientes
+// Resumen individual
 async function getClientDebt(nombreCompleto) {
   const rows = await findClientRows(nombreCompleto);
   if (rows.length === 0) return null;
@@ -126,7 +121,6 @@ async function getClientDebt(nombreCompleto) {
   const nombre = rows[0].get('Nombre');
   const apellido = rows[0].get('Apellido');
 
-  // Solo cuotas con deuda > 0
   const cuotas = rows
     .filter((row) => parseDeuda(row.get('Deuda')) > 0)
     .map((row) => ({
@@ -140,16 +134,15 @@ async function getClientDebt(nombreCompleto) {
     nombre,
     apellido,
     deuda: totalDeuda,
-    cuotas, // desglose de tickets pendientes
+    cuotas,
   };
 }
 
-// Resumen general: un cliente por entrada, con total acumulado (ignora saldo $0)
+// Resumen general
 async function getSummary() {
   const sheet = await getSheet();
   const rows = await sheet.getRows();
 
-  // Agrupamos por "Nombre Apellido" normalizado
   const mapa = {};
 
   for (const row of rows) {
@@ -164,28 +157,37 @@ async function getSummary() {
     mapa[key].deuda += deuda;
   }
 
-  // Devolvemos solo clientes con deuda > 0, ordenados por deuda descendente
   return Object.values(mapa)
     .filter((c) => c.deuda > 0)
     .sort((a, b) => b.deuda - a.deuda);
 }
 
-// Vencimientos de hoy: cada FILA independiente con fecha de hoy y deuda > 0
+// NUEVO: Vencimientos de hoy a prueba de balas (no le importan los ceros a la izquierda)
 async function getVencimientosHoy() {
   const sheet = await getSheet();
   const rows = await sheet.getRows();
 
   const hoy = new Date();
-  const diaHoy = String(hoy.getDate()).padStart(2, '0');
-  const mesHoy = String(hoy.getMonth() + 1).padStart(2, '0');
+  const diaHoy = hoy.getDate();
+  const mesHoy = hoy.getMonth() + 1;
   const anioHoy = hoy.getFullYear();
-  const fechaHoy = `${diaHoy}/${mesHoy}/${anioHoy}`;
 
   return rows
     .filter((row) => {
       const fechaLimite = (row.get('Fecha Limite') || '').trim();
       const deuda = parseDeuda(row.get('Deuda'));
-      return fechaLimite === fechaHoy && deuda > 0;
+      
+      if (deuda <= 0 || !fechaLimite) return false;
+
+      // Desarmamos la fecha del excel y comparamos número por número
+      const partes = fechaLimite.split('/');
+      if (partes.length !== 3) return false;
+
+      const d = parseInt(partes[0], 10);
+      const m = parseInt(partes[1], 10);
+      const y = parseInt(partes[2], 10);
+
+      return d === diaHoy && m === mesHoy && y === anioHoy;
     })
     .map((row) => ({
       nombre: row.get('Nombre'),
@@ -195,12 +197,11 @@ async function getVencimientosHoy() {
     }));
 }
 
-// Actualiza la fecha de la primera fila pendiente de un cliente
+// Actualiza la fecha
 async function updateFecha(nombreCompleto, nuevaFecha) {
   const rows = await findClientRows(nombreCompleto);
   if (rows.length === 0) return null;
 
-  // Actualizamos la primera fila con deuda > 0
   const filaPendiente = rows.find((row) => parseDeuda(row.get('Deuda')) > 0);
   if (!filaPendiente) return null;
 
