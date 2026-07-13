@@ -14,15 +14,24 @@ async function getSheet() {
   return doc.sheetsByIndex[0];
 }
 
-// Compara sin importar mayúsculas o espacios extra
+// Quita tildes/diacríticos además de bajar a minúsculas y recortar espacios.
+// "Zárate" y "Zarate" ahora se consideran el mismo nombre.
 function normalizar(str) {
-  return (str || '').trim().toLowerCase().replace(/\s+/g, ' ');
+  return (str || '')
+    .trim()
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '') // elimina las marcas de acento
+    .replace(/\s+/g, ' ');
 }
 
-// NUEVO: Capitaliza la primera letra de cada palabra (Ej: "juan cruz" -> "Juan Cruz")
 function formatearNombre(str) {
   if (!str) return '';
-  return normalizar(str).replace(/\b\w/g, c => c.toUpperCase());
+  return (str || '')
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, ' ')
+    .replace(/\b\w/g, (c) => c.toUpperCase());
 }
 
 function parseDeuda(valor) {
@@ -35,7 +44,6 @@ function parseDeuda(valor) {
   return isNaN(monto) ? 0 : monto;
 }
 
-// Devuelve TODAS las filas de un cliente
 async function findClientRows(nombreCompleto) {
   const sheet = await getSheet();
   const rows = await sheet.getRows();
@@ -48,7 +56,6 @@ async function findClientRows(nombreCompleto) {
   });
 }
 
-// NUEVA DEUDA: Guarda embelleciendo el texto
 async function addClient(nombre, apellido, monto, fechaLimite = '') {
   const sheet = await getSheet();
 
@@ -62,25 +69,31 @@ async function addClient(nombre, apellido, monto, fechaLimite = '') {
   return true;
 }
 
-// DÉBITO FIFO
+// DÉBITO FIFO — ahora calcula el total EN MEMORIA, sin re-consultar el Sheet
 async function updateDebt(nombreCompleto, delta) {
   const rows = await findClientRows(nombreCompleto);
 
-  if (rows.length === 0) return null;
+  if (rows.length === 0) {
+    console.log(`[updateDebt] No se encontró: "${nombreCompleto}" (normalizado: "${normalizar(nombreCompleto)}")`);
+    return null;
+  }
 
   const nombre = rows[0].get('Nombre');
   const apellido = rows[0].get('Apellido');
 
   if (delta > 0) {
+    // Acreditación directa sobre la última fila (caso borde, /a ya no pasa por acá normalmente)
     const ultimaFila = rows[rows.length - 1];
     const deudaActual = parseDeuda(ultimaFila.get('Deuda'));
     ultimaFila.set('Deuda', deudaActual + delta);
     await ultimaFila.save();
 
-    const totalNuevo = await getTotalDeuda(nombreCompleto);
-    return { nuevaDeuda: totalNuevo, nombre, apellido, desglose: null };
+    // Total calculado en memoria: sumamos todas las filas, usando el valor ya actualizado
+    const totalNuevo = rows.reduce((acc, row) => acc + parseDeuda(row.get('Deuda')), 0);
+    return { nuevaDeuda: totalNuevo, nombre, apellido };
   }
 
+  // Pago: aplicamos FIFO sobre las filas ordenadas tal como vienen (más antigua primero)
   let montoPendiente = Math.abs(delta);
   const rowsGuardadas = [];
 
@@ -88,7 +101,7 @@ async function updateDebt(nombreCompleto, delta) {
     if (montoPendiente <= 0) break;
 
     const deudaFila = parseDeuda(row.get('Deuda'));
-    if (deudaFila <= 0) continue; 
+    if (deudaFila <= 0) continue; // fila ya saldada
 
     if (montoPendiente >= deudaFila) {
       montoPendiente -= deudaFila;
@@ -103,17 +116,15 @@ async function updateDebt(nombreCompleto, delta) {
 
   await Promise.all(rowsGuardadas.map((row) => row.save()));
 
-  const totalNuevo = await getTotalDeuda(nombreCompleto);
-  return { nuevaDeuda: totalNuevo, nombre, apellido, desglose: null };
+  // 🔧 FIX CLAVE: sumamos directamente de `rows` (ya tiene los valores actualizados
+  // en memoria tras los .set() de arriba), sin volver a pedirle nada a Google Sheets.
+  const totalNuevo = rows.reduce((acc, row) => acc + parseDeuda(row.get('Deuda')), 0);
+
+  console.log(`[updateDebt] ${nombre} ${apellido} | delta: ${delta} | sobrante sin aplicar: ${montoPendiente} | nuevo total: ${totalNuevo}`);
+
+  return { nuevaDeuda: totalNuevo, nombre, apellido };
 }
 
-// Suma todas las deudas de un cliente
-async function getTotalDeuda(nombreCompleto) {
-  const rows = await findClientRows(nombreCompleto);
-  return rows.reduce((acc, row) => acc + parseDeuda(row.get('Deuda')), 0);
-}
-
-// Resumen individual
 async function getClientDebt(nombreCompleto) {
   const rows = await findClientRows(nombreCompleto);
   if (rows.length === 0) return null;
@@ -130,15 +141,9 @@ async function getClientDebt(nombreCompleto) {
 
   const totalDeuda = cuotas.reduce((acc, c) => acc + c.deuda, 0);
 
-  return {
-    nombre,
-    apellido,
-    deuda: totalDeuda,
-    cuotas,
-  };
+  return { nombre, apellido, deuda: totalDeuda, cuotas };
 }
 
-// Resumen general
 async function getSummary() {
   const sheet = await getSheet();
   const rows = await sheet.getRows();
@@ -149,7 +154,9 @@ async function getSummary() {
     const nombre = row.get('Nombre') || '';
     const apellido = row.get('Apellido') || '';
     const key = normalizar(`${nombre} ${apellido}`);
-    const deuda = parseDeuda(row.get('Deuda')) ;
+    const deuda = parseDeuda(row.get('Deuda'));
+
+    if (!key) continue; // saltamos filas totalmente vacías
 
     if (!mapa[key]) {
       mapa[key] = { nombre, apellido, deuda: 0 };
@@ -162,7 +169,6 @@ async function getSummary() {
     .sort((a, b) => b.deuda - a.deuda);
 }
 
-// NUEVO: Vencimientos de hoy a prueba de balas (no le importan los ceros a la izquierda)
 async function getVencimientosHoy() {
   const sheet = await getSheet();
   const rows = await sheet.getRows();
@@ -176,10 +182,9 @@ async function getVencimientosHoy() {
     .filter((row) => {
       const fechaLimite = (row.get('Fecha Limite') || '').trim();
       const deuda = parseDeuda(row.get('Deuda'));
-      
+
       if (deuda <= 0 || !fechaLimite) return false;
 
-      // Desarmamos la fecha del excel y comparamos número por número
       const partes = fechaLimite.split('/');
       if (partes.length !== 3) return false;
 
@@ -197,7 +202,6 @@ async function getVencimientosHoy() {
     }));
 }
 
-// Actualiza la fecha
 async function updateFecha(nombreCompleto, nuevaFecha) {
   const rows = await findClientRows(nombreCompleto);
   if (rows.length === 0) return null;
