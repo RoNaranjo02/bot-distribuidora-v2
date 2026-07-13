@@ -139,7 +139,6 @@ client.on('disconnected', (reason) => {
 
 client.on('message', async (msg) => {
   try {
-    // Comando de diagnóstico — muestra IDs exactos para configurar .env
     if (msg.body.trim() === '/id') {
       const chat = await msg.getChat();
       const senderId = msg.author || msg.from;
@@ -147,29 +146,22 @@ client.on('message', async (msg) => {
         `*Datos de diagnóstico:*`,
         `👤 Tu ID (senderId): ${senderId}`,
         `💬 ID de este chat: ${chat.id._serialized}`,
-        ``,
-        `*Valores actuales en config:*`,
-        `GROUP_ID: ${config.groupId}`,
-        `ALLOWED_NUMBERS: ${config.allowedNumbers.join(', ')}`,
-        ``,
-        `*¿Coinciden?*`,
-        `Grupo: ${chat.id._serialized === config.groupId ? '✅ SÍ' : '❌ NO'}`,
-        `Sender: ${config.allowedNumbers.includes(senderId) ? '✅ SÍ' : '❌ NO'}`,
       ].join('\n');
-
       await msg.reply(info);
-      console.log('=== DIAGNÓSTICO ===');
-      console.log('senderId:', senderId);
-      console.log('chatId:', chat.id._serialized);
-      console.log('groupId en config:', config.groupId);
-      console.log('allowedNumbers en config:', config.allowedNumbers);
-      console.log('===================');
       return;
     }
 
     await handleMessage(msg, client);
   } catch (err) {
+    // 🔧 FIX CLAVE: antes esto solo iba a console.error y el usuario
+    // no se enteraba de nada. Ahora también avisamos en el grupo.
     console.error('Error procesando mensaje:', err);
+    try {
+      const chat = await msg.getChat();
+      await chat.sendMessage('⚠️ Ocurrió un error procesando tu comando. Probá de nuevo en unos segundos, o avisale a Ro si se repite.');
+    } catch (errChat) {
+      console.error('Además, falló el aviso al chat:', errChat);
+    }
   }
 });
 
@@ -333,8 +325,10 @@ async function handleHoy(chat) {
 }
 
 function iniciarCronJobs(client) {
-  cron.schedule('0 08 * * *', async () => {
-    console.log('⏰ Cron: revisando vencimientos de hoy...');
+  const HORA_ARG = 8; // 8am hora Argentina
+
+  const task = cron.schedule('0 8 * * *', async () => {
+    console.log(`⏰ [${new Date().toISOString()}] Cron disparado: revisando vencimientos de hoy...`);
     try {
       const vencimientos = await sheets.getVencimientosHoy();
 
@@ -360,5 +354,10 @@ function iniciarCronJobs(client) {
     timezone: 'America/Argentina/Buenos_Aires',
   });
 
-  console.log('⏰ Cron job iniciado.');
+  // 🔧 Verificación explícita de que el cron quedó registrado.
+  // Si esto NO aparece en los logs de Railway, el timezone falló al resolverse
+  // (típico en imágenes Docker sin tzdata completo) y hay que instalar tzdata
+  // en el Dockerfile/nixpacks, o cambiar a horario UTC manual (8am ARG = 11am UTC).
+  console.log(`⏰ Cron job registrado: ${task ? 'OK' : 'FALLÓ'} — corre todos los días a las ${HORA_ARG}:00 hora ARG.`);
+  console.log(`⏰ Hora actual del servidor: ${new Date().toISOString()} (UTC)`);
 }
