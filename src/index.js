@@ -109,10 +109,10 @@ const client = new Client({
     headless: true,
     args: puppeteerArgs,
   },
-  // 🔧 CAMBIO CLAVE: en vez de pinear una versión fija que puede quedar vieja
-  // o directamente faltar en el repo, le pedimos a WhatsApp la versión actual real.
+  // 🔥 PARCHE DEFINITIVO: Congela WhatsApp en una versión que no tira error r:r
   webVersionCache: {
-    type: 'none',
+    type: 'remote',
+    remotePath: 'https://raw.githubusercontent.com/wppconnect-team/wa-version/main/html/2.2412.54.html',
   },
   authTimeoutMs: 120000,
 });
