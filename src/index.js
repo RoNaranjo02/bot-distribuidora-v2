@@ -109,9 +109,10 @@ const client = new Client({
     headless: true,
     args: puppeteerArgs,
   },
+  // 🔧 CAMBIO CLAVE: en vez de pinear una versión fija que puede quedar vieja
+  // o directamente faltar en el repo, le pedimos a WhatsApp la versión actual real.
   webVersionCache: {
-    type: 'remote',
-    remotePath: 'https://raw.githubusercontent.com/wppconnect-team/wa-version/main/html/2.2412.54.html',
+    type: 'none',
   },
   authTimeoutMs: 120000,
 });
@@ -140,13 +141,13 @@ client.on('disconnected', (reason) => {
 
 client.on('message', async (msg) => {
   try {
+    // 🔧 Ya NO usa msg.getChat() — solo IDs directos
     if (msg.body.trim() === '/id') {
-      const chat = await msg.getChat();
       const senderId = msg.author || msg.from;
       const info = [
         `*Datos de diagnóstico:*`,
         `👤 Tu ID (senderId): ${senderId}`,
-        `💬 ID de este chat: ${chat.id._serialized}`,
+        `💬 ID de este chat: ${msg.from}`,
       ].join('\n');
       await msg.reply(info);
       return;
@@ -154,12 +155,10 @@ client.on('message', async (msg) => {
 
     await handleMessage(msg, client);
   } catch (err) {
-    // 🔧 FIX CLAVE: antes esto solo iba a console.error y el usuario
-    // no se enteraba de nada. Ahora también avisamos en el grupo.
     console.error('Error procesando mensaje:', err);
     try {
-      const chat = await msg.getChat();
-      await chat.sendMessage('⚠️ Ocurrió un error procesando tu comando. Probá de nuevo en unos segundos, o avisale a Ro si se repite.');
+      // 🔧 Ya NO usa msg.getChat() — manda directo con el ID
+      await client.sendMessage(msg.from, '⚠️ Ocurrió un error procesando tu comando. Probá de nuevo en unos segundos, o avisale a Ro si se repite.');
     } catch (errChat) {
       console.error('Además, falló el aviso al chat:', errChat);
     }
@@ -171,17 +170,14 @@ client.initialize();
 // ─── HANDLERS ────────────────────────────────────────────────────────────────
 
 async function handleMessage(msg, client) {
-  const chat = await msg.getChat();
+  // 🔧 Ya NO usa msg.getChat() — msg.from ya es el ID del chat/grupo
+  const chatId = msg.from;
   const senderId = msg.author || msg.from;
   const text = msg.body.trim();
 
-  // ── DEBUG TEMPORAL ───────────────────────────────────────────────
-  console.log(`[MSG] chat: ${chat.id._serialized} | sender: ${senderId} | text: ${text}`);
-  console.log(`[FILTRO GRUPO] esperado="${config.groupId}" recibido="${chat.id._serialized}" match=${chat.id._serialized === config.groupId}`);
-  console.log(`[FILTRO SENDER] allowed=${JSON.stringify(config.allowedNumbers)} sender="${senderId}" match=${config.allowedNumbers.includes(senderId)}`);
-  // ─────────────────────────────────────────────────────────────────
+  console.log(`[MSG] chat: ${chatId} | sender: ${senderId} | text: ${text}`);
 
-  if (chat.id._serialized !== config.groupId) {
+  if (chatId !== config.groupId) {
     console.log('[BLOQUEADO] Por filtro de grupo');
     return;
   }
@@ -192,74 +188,76 @@ async function handleMessage(msg, client) {
   }
 
   if (isAyudaCommand(text)) {
-    await chat.sendMessage(MENSAJE_AYUDA);
+    await client.sendMessage(chatId, MENSAJE_AYUDA);
     return;
   }
 
   if (isHoyCommand(text)) {
-    return handleHoy(chat);
+    return handleHoy(client, chatId);
   }
 
   const nuevoCliente = parseNuevo(text);
-  if (nuevoCliente) return handleNuevaDeuda(chat, nuevoCliente);
+  if (nuevoCliente) return handleNuevaDeuda(client, chatId, nuevoCliente);
 
   const cambioFecha = parseFecha(text);
-  if (cambioFecha) return handleUpdateFecha(chat, cambioFecha);
+  if (cambioFecha) return handleUpdateFecha(client, chatId, cambioFecha);
 
   const resumen = parseResumen(text);
   if (resumen) {
     return resumen.nombreCompleto === null
-      ? handleResumenGeneral(chat)
-      : handleResumenCliente(chat, resumen.nombreCompleto);
+      ? handleResumenGeneral(client, chatId)
+      : handleResumenCliente(client, chatId, resumen.nombreCompleto);
   }
 
   const parsed = parseDebitoCredito(text);
-  if (parsed) return handleDebitoCredito(chat, parsed);
+  if (parsed) return handleDebitoCredito(client, chatId, parsed);
 
   console.log('[SIN MATCH] El mensaje no coincidió con ningún comando.');
 }
 
-async function handleDebitoCredito(chat, { nombreCompleto, monto }) {
+async function handleDebitoCredito(client, chatId, { nombreCompleto, monto }) {
   const resultado = await sheets.updateDebt(nombreCompleto, -monto);
 
   if (resultado === null) {
-    await chat.sendMessage(`❌ Cliente no encontrado: ${nombreCompleto}\n\nVerificá que el nombre coincida con el del registro.`);
+    await client.sendMessage(chatId, `❌ Cliente no encontrado: ${nombreCompleto}\n\nVerificá que el nombre coincida con el del registro.`);
     return;
   }
 
   const { nuevaDeuda, nombre, apellido } = resultado;
-  await chat.sendMessage(
+  await client.sendMessage(
+    chatId,
     `Pago registrado ✅\n\n👤 ${nombre} ${apellido}\n💰 Saldo restante: $${nuevaDeuda.toLocaleString('es-AR')}`
   );
 }
 
-async function handleNuevaDeuda(chat, { nombre, apellido, monto, fecha }) {
+async function handleNuevaDeuda(client, chatId, { nombre, apellido, monto, fecha }) {
   await sheets.addClient(nombre, apellido, monto, fecha);
 
   let mensaje = `✅ *Nueva deuda registrada*\n\n👤 ${nombre} ${apellido}\n💰 Monto: $${monto.toLocaleString('es-AR')}`;
   if (fecha) mensaje += `\n📅 Fecha límite: ${fecha}`;
 
-  await chat.sendMessage(mensaje);
+  await client.sendMessage(chatId, mensaje);
 }
 
-async function handleUpdateFecha(chat, { nombreCompleto, fecha }) {
+async function handleUpdateFecha(client, chatId, { nombreCompleto, fecha }) {
   const resultado = await sheets.updateFecha(nombreCompleto, fecha);
 
   if (resultado === null) {
-    await chat.sendMessage(`❌ Cliente no encontrado: ${nombreCompleto}`);
+    await client.sendMessage(chatId, `❌ Cliente no encontrado: ${nombreCompleto}`);
     return;
   }
 
-  await chat.sendMessage(
+  await client.sendMessage(
+    chatId,
     `✅ *Fecha actualizada*\n\n👤 ${resultado.nombre} ${resultado.apellido}\n📅 Nueva fecha límite: ${resultado.fechaLimite}`
   );
 }
 
-async function handleResumenCliente(chat, nombreCompleto) {
+async function handleResumenCliente(client, chatId, nombreCompleto) {
   const data = await sheets.getClientDebt(nombreCompleto);
 
   if (data === null) {
-    await chat.sendMessage(`❌ Cliente no encontrado: ${nombreCompleto}`);
+    await client.sendMessage(chatId, `❌ Cliente no encontrado: ${nombreCompleto}`);
     return;
   }
 
@@ -276,14 +274,14 @@ async function handleResumenCliente(chat, nombreCompleto) {
     mensaje += `📅 Fecha límite: ${cuotas[0].fechaLimite}`;
   }
 
-  await chat.sendMessage(mensaje);
+  await client.sendMessage(chatId, mensaje);
 }
 
-async function handleResumenGeneral(chat) {
+async function handleResumenGeneral(client, chatId) {
   const data = await sheets.getSummary();
 
   if (data.length === 0) {
-    await chat.sendMessage('✨ *Todo al día* ✨\nNo hay clientes con saldo pendiente en este momento.');
+    await client.sendMessage(chatId, '✨ *Todo al día* ✨\nNo hay clientes con saldo pendiente en este momento.');
     return;
   }
 
@@ -300,14 +298,14 @@ async function handleResumenGeneral(chat) {
   resumen += '════════════════════\n';
   resumen += `📈 *TOTAL ADEUDADO:* $${total.toLocaleString('es-AR')}`;
 
-  await chat.sendMessage(resumen);
+  await client.sendMessage(chatId, resumen);
 }
 
-async function handleHoy(chat) {
+async function handleHoy(client, chatId) {
   const vencimientos = await sheets.getVencimientosHoy();
 
   if (vencimientos.length === 0) {
-    await chat.sendMessage('✨ *Todo al día* ✨\nNo hay vencimientos programados para hoy.');
+    await client.sendMessage(chatId, '✨ *Todo al día* ✨\nNo hay vencimientos programados para hoy.');
     return;
   }
 
@@ -322,14 +320,14 @@ async function handleHoy(chat) {
   mensaje += '════════════════════\n';
   mensaje += '_Por favor regularizar los pagos._';
 
-  await chat.sendMessage(mensaje);
+  await client.sendMessage(chatId, mensaje);
 }
 
 function iniciarCronJobs(client) {
-  const HORA_ARG = 8; // 8am hora Argentina
+  const HORA_ARG = 8;
 
   const task = cron.schedule('0 8 * * *', async () => {
-    console.log(`⏰ [${new Date().toISOString()}] Cron disparado: revisando vencimientos de hoy...`);
+    console.log(`⏰ [${new Date().toISOString()}] Cron disparado: revisando vencimientos...`);
     try {
       const vencimientos = await sheets.getVencimientosHoy();
 
@@ -338,15 +336,14 @@ function iniciarCronJobs(client) {
         return;
       }
 
-      const chat = await client.getChatById(config.groupId);
       let mensaje = '⚠️ *Vencimientos de hoy:*\n\n';
-
       vencimientos.forEach(({ nombre, apellido, deuda, fechaLimite }) => {
         mensaje += `• *${nombre} ${apellido}*: $${deuda.toLocaleString('es-AR')} (vence ${fechaLimite})\n`;
       });
-
       mensaje += '\n_Por favor contactarse a la brevedad con los deudores._';
-      await chat.sendMessage(mensaje);
+
+      // 🔧 Ya NO usa client.getChatById() — manda directo por ID
+      await client.sendMessage(config.groupId, mensaje);
       console.log(`📨 Alerta enviada con ${vencimientos.length} vencimiento(s).`);
     } catch (err) {
       console.error('❌ Error en cron:', err);
@@ -355,10 +352,5 @@ function iniciarCronJobs(client) {
     timezone: 'America/Argentina/Buenos_Aires',
   });
 
-  // 🔧 Verificación explícita de que el cron quedó registrado.
-  // Si esto NO aparece en los logs de Railway, el timezone falló al resolverse
-  // (típico en imágenes Docker sin tzdata completo) y hay que instalar tzdata
-  // en el Dockerfile/nixpacks, o cambiar a horario UTC manual (8am ARG = 11am UTC).
   console.log(`⏰ Cron job registrado: ${task ? 'OK' : 'FALLÓ'} — corre todos los días a las ${HORA_ARG}:00 hora ARG.`);
-  console.log(`⏰ Hora actual del servidor: ${new Date().toISOString()} (UTC)`);
 }
