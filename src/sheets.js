@@ -36,10 +36,15 @@ function formatearNombre(str) {
 
 function parseDeuda(valor) {
   if (!valor) return 0;
+
+  if (typeof valor === 'number') return valor;
+
   let str = String(valor).trim();
   if (str === '') return 0;
-  let limpio = str.replace(/\./g, '');
+
+  let limpio = str.replace(/\.(?=\d{3}(\D|$))/g, '');
   limpio = limpio.replace(',', '.');
+  
   const monto = parseFloat(limpio);
   return isNaN(monto) ? 0 : monto;
 }
@@ -114,10 +119,11 @@ async function updateDebt(nombreCompleto, delta) {
     rowsGuardadas.push(row);
   }
 
-  await Promise.all(rowsGuardadas.map((row) => row.save()));
 
-  // 🔧 FIX CLAVE: sumamos directamente de `rows` (ya tiene los valores actualizados
-  // en memoria tras los .set() de arriba), sin volver a pedirle nada a Google Sheets.
+    for (const row of rowsGuardadas) {
+      await row.save();
+    }
+
   const totalNuevo = rows.reduce((acc, row) => acc + parseDeuda(row.get('Deuda')), 0);
 
   console.log(`[updateDebt] ${nombre} ${apellido} | delta: ${delta} | sobrante sin aplicar: ${montoPendiente} | nuevo total: ${totalNuevo}`);
