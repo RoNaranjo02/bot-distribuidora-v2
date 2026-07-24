@@ -42,9 +42,11 @@ function parseDeuda(valor) {
   let str = String(valor).trim();
   if (str === '') return 0;
 
+  str = str.replace(/[^0-9.,-]/g, '');
+
   let limpio = str.replace(/\.(?=\d{3}(\D|$))/g, '');
   limpio = limpio.replace(',', '.');
-  
+
   const monto = parseFloat(limpio);
   return isNaN(monto) ? 0 : monto;
 }
@@ -64,12 +66,19 @@ async function findClientRows(nombreCompleto) {
 async function addClient(nombre, apellido, monto, fechaLimite = '') {
   const sheet = await getSheet();
 
+  // 🔧 FIX: { insert: true } fuerza una inserción real de fila (INSERT_ROWS),
+  // en vez del comportamiento por defecto de addRow(), que usa el método
+  // "append" de la API de Sheets. Ese método busca la última fila con datos
+  // escaneando desde arriba, y si encuentra una fila vacía en el medio de la
+  // hoja, la toma como "libre" y escribe siempre ahí — pisando lo anterior
+  // en vez de agregar una fila nueva al final. Con insert:true este problema
+  // desaparece porque siempre agrega una fila genuina.
   await sheet.addRow({
     'Nombre': formatearNombre(nombre),
     'Apellido': formatearNombre(apellido),
     'Deuda': monto,
     'Fecha Limite': fechaLimite,
-  });
+  }, { insert: true });
 
   return true;
 }
